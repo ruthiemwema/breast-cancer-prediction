@@ -117,8 +117,8 @@ with st.sidebar:
     st.caption("• Streamlit")
     st.caption("• Scikit-learn")
     st.caption("• Pandas")
-    st.caption("• NumPy")                                                        
-
+    st.caption("• NumPy")
+    
     st.markdown("---")
     st.caption(f"© {datetime.now().year} {AUTHOR_NAME}")
 
