@@ -1,92 +1,130 @@
-import os
-import sys
 import json
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+
 import joblib
 import numpy as np
-import pandas as pd
-from sklearn.datasets import load_breast_cancer
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
 
-# This is for Vercel serverless function
-from http.server import BaseHTTPRequestHandler
+
+# Project root directory
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load the trained model and supporting files
+MODEL_PATH = BASE_DIR / "logistic_regression_model.pkl"
+SCALER_PATH = BASE_DIR / "scaler.pkl"
+FEATURE_NAMES_PATH = BASE_DIR / "feature_names.pkl"
+
+model = joblib.load(MODEL_PATH)
+scaler = joblib.load(SCALER_PATH)
+feature_names = joblib.load(FEATURE_NAMES_PATH)
+
 
 class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+
+    def send_json(self, status_code, data):
+        response = json.dumps(data).encode("utf-8")
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
-        self.wfile.write(str("Breast Cancer Prediction API is running!").encode())
-    
+
+        self.wfile.write(response)
+
+    def do_OPTIONS(self):
+        self.send_json(200, {"message": "OK"})
+
+    def do_GET(self):
+        self.send_json(
+            200,
+            {
+                "message": "Breast Cancer Prediction API is running!",
+                "features": len(feature_names),
+                "endpoint": "/api/predict"
+            }
+        )
+
     def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        
+
         try:
-            # Parse JSON data
-            data = json.loads(post_data)
-            
-            # Get features from request
-            features = data.get('features', [])
-            
-            if not features:
-                response = {"error": "No features provided"}
-                self._send_response(400, response)
+            # Read request body
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length)
+
+            # Convert JSON to Python dictionary
+            data = json.loads(post_data.decode("utf-8"))
+
+            # Get feature values
+            features = data.get("features")
+
+            if features is None:
+                self.send_json(
+                    400,
+                    {"error": "No features were provided."}
+                )
                 return
-            
-            # Train model if not exists
-            model, scaler, feature_names = train_model()
-            
-            # Convert to numpy array
-            input_data = np.array(features).reshape(1, -1)
-            
-            # Scale the input
+
+            # Make sure exactly 30 measurements were provided
+            if len(features) != len(feature_names):
+                self.send_json(
+                    400,
+                    {
+                        "error": f"Expected {len(feature_names)} features, "
+                                 f"but received {len(features)}."
+                    }
+                )
+                return
+
+            # Convert input to NumPy array
+            input_data = np.array(features, dtype=float).reshape(1, -1)
+
+            # Scale using the SAME scaler used during training
             input_scaled = scaler.transform(input_data)
-            
+
             # Make prediction
             prediction = model.predict(input_scaled)[0]
+
+            # Get probabilities
             probabilities = model.predict_proba(input_scaled)[0]
-            
-            # Prepare response
+
+            # Your project uses:
+            # 0 = Benign
+            # 1 = Malignant
+
+            benign_probability = float(probabilities[0])
+            malignant_probability = float(probabilities[1])
+
+            diagnosis = (
+                "Malignant"
+                if prediction == 1
+                else "Benign"
+            )
+
+            confidence = max(
+                benign_probability,
+                malignant_probability
+            )
+
             result = {
                 "prediction": int(prediction),
-                "diagnosis": "Malignant" if prediction == 1 else "Benign",
-                "confidence": float(max(probabilities)),
-                "probability_benign": float(probabilities[0]),
-                "probability_malignant": float(probabilities[1])
+                "diagnosis": diagnosis,
+                "confidence": float(confidence),
+                "probability_benign": benign_probability,
+                "probability_malignant": malignant_probability
             }
-            
-            self._send_response(200, result)
-            
-        except Exception as e:
-            response = {"error": str(e)}
-            self._send_response(500, response)
-    
-    def _send_response(self, status_code, data):
-        self.send_response(status_code)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
 
-def train_model():
-    # Load the breast cancer dataset
-    data = load_breast_cancer()
-    X = data.data
-    y = data.target
-    
-    # Split into train and test
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    
-    # Scale the features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    
-    # Train the model
-    model = LogisticRegression(max_iter=1000, random_state=42)
-    model.fit(X_train_scaled, y_train)
-    
-    return model, scaler, data.feature_names
+            self.send_json(200, result)
+
+        except ValueError:
+            self.send_json(
+                400,
+                {"error": "Feature values must be numeric."}
+            )
+
+        except Exception as e:
+            self.send_json(
+                500,
+                {"error": str(e)}
+            )
